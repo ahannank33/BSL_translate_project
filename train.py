@@ -13,13 +13,14 @@ convert_kaggle_dataset.py or data_collection.py.
 
 Saves two files:
   bsl_data/bsl_model.keras      ← the trained neural network
+  bsl_data/bsl_model.h5      ← the trained neural network
   bsl_data/label_encoder.pkl    ← maps class indices back to letter names
 """
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 DATA_DIR   = "bsl_data"
 CSV_FILE   = os.path.join(DATA_DIR, "bsl_landmarks.csv")
-MODEL_FILE = os.path.join(DATA_DIR, "bsl_model.keras")
+MODEL_FILE = os.path.join(DATA_DIR, "bsl_model.h5")
 ENCODER_FILE = os.path.join(DATA_DIR, "label_encoder.pkl")
 
 print("=" * 60)

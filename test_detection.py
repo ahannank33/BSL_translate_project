@@ -1,4 +1,5 @@
 import cv2
+import time
 import numpy as np
 import os
 import pickle
@@ -10,8 +11,8 @@ from mediapipe.tasks.python import vision
 
 """
 Live BSL detection running TWO models simultaneously:
-  - Alphabet model  (bsl_model.keras)       → letters A-Z
-  - Word sign model (word_model.keras)      → common words (hello, baby, ...)
+  - Alphabet model  (bsl_model.h5)          → letters A-Z
+  - Word sign model (word_model.h5)         → common words (hello, baby, ...)
 
 Run from the hands/ folder:
     python test_detection.py
@@ -25,11 +26,11 @@ DATA_DIR   = "bsl_data"
 SHOW_LETTERS = False
 
 # Alphabet model
-MODEL_FILE   = os.path.join(DATA_DIR, "bsl_model.keras")
+MODEL_FILE   = os.path.join(DATA_DIR, "bsl_model.h5")
 ENCODER_FILE = os.path.join(DATA_DIR, "label_encoder.pkl")
 
 # Word model
-WORD_MODEL_FILE   = os.path.join(DATA_DIR, "word_model.keras")
+WORD_MODEL_FILE   = os.path.join(DATA_DIR, "word_model.h5")
 WORD_ENCODER_FILE = os.path.join(DATA_DIR, "word_label_encoder.pkl")
 
 # MediaPipe
@@ -150,7 +151,7 @@ download_mp_model()
 
 options = vision.HandLandmarkerOptions(
     base_options=mp_python.BaseOptions(model_asset_path=MP_MODEL_FILE),
-    running_mode=vision.RunningMode.IMAGE,
+    running_mode=vision.RunningMode.VIDEO,
     num_hands=2,
     min_hand_detection_confidence=0.7,
     min_hand_presence_confidence=0.7,
@@ -159,6 +160,8 @@ options = vision.HandLandmarkerOptions(
 landmarker = vision.HandLandmarker.create_from_options(options)
 
 cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 print("Webcam open — show a hand sign. Press ESC to quit.\n")
 
 letter_buffer = deque(maxlen=SMOOTH_FRAMES)
@@ -204,7 +207,8 @@ while cap.isOpened():
     rgb   = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-    result   = landmarker.detect(mp_image)
+    timestamp_ms = int(time.time() * 1000)
+    result   = landmarker.detect_for_video(mp_image, timestamp_ms)
 
     h1, h2    = get_left_right(result)
     num_hands = len(result.hand_landmarks) if result.hand_landmarks else 0
