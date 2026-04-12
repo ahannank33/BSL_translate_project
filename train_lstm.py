@@ -24,7 +24,7 @@ from tensorflow.keras import layers, callbacks
 # ── Config ─────────────────────────────────────────────────────────────────────
 DATA_DIR     = "bsl_data"
 SEQ_DIR      = os.path.join(DATA_DIR, "lstm_sequences")
-MODEL_PATH   = os.path.join(DATA_DIR, "lstm_model.keras")
+MODEL_PATH   = os.path.join(DATA_DIR, "lstm_model.h5")
 ENCODER_PATH = os.path.join(DATA_DIR, "lstm_label_encoder.pkl")
 
 SEQUENCE_LEN  = 30    # frames per sequence (must match data_collection_lstm.py)

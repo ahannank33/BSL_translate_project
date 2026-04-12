@@ -23,7 +23,7 @@ from tensorflow.keras import layers, callbacks
 # ── Config ─────────────────────────────────────────────────────────────────────
 DATA_DIR     = "bsl_data"
 CSV_PATH     = os.path.join(DATA_DIR, "word_landmarks.csv")
-MODEL_PATH   = os.path.join(DATA_DIR, "word_model.keras")
+MODEL_PATH   = os.path.join(DATA_DIR, "word_model.h5")
 ENCODER_PATH = os.path.join(DATA_DIR, "word_label_encoder.pkl")
 
 EPOCHS       = 100

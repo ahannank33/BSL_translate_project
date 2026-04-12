@@ -30,7 +30,7 @@ Controls:
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 DATA_DIR       = "bsl_data"
-MODEL_PATH     = os.path.join(DATA_DIR, "lstm_model.keras")
+MODEL_PATH     = os.path.join(DATA_DIR, "lstm_model.h5")
 ENCODER_PATH   = os.path.join(DATA_DIR, "lstm_label_encoder.pkl")
 MP_MODEL_FILE  = os.path.join(DATA_DIR, "hand_landmarker.task")
 MP_MODEL_URL   = ("https://storage.googleapis.com/mediapipe-models/"
@@ -38,16 +38,14 @@ MP_MODEL_URL   = ("https://storage.googleapis.com/mediapipe-models/"
 
 SEQUENCE_LEN      = 30     # must match training
 FEATURE_DIM       = 126
-CONF_THRESHOLD    = 0.60   # min confidence to show prediction
+CONF_THRESHOLD    = 0.60   # min confidence to lock a prediction
 
-# Motion-change detection — if landmark shift exceeds this threshold,
-# the prediction buffer is flushed so the new gesture registers immediately.
-# Lower = more sensitive to gesture changes (try 0.08–0.20)
-MOTION_THRESHOLD  = 0.12
+# How many frames to keep showing the last word after the hand leaves frame.
+# ~90 frames ≈ 3 seconds at 30 fps. Set to 0 to disable.
+HOLD_FRAMES       = 90
 
-# Number of recent predictions kept for smoothing.
-# Smaller = snappier switching; larger = steadier label.
-PRED_BUFFER_SIZE  = 5
+# Number of recent raw predictions kept for smoothing.
+PRED_BUFFER_SIZE  = 3
 
 ZERO_FRAME = np.zeros(FEATURE_DIM, dtype=np.float32)
 
@@ -153,12 +151,18 @@ print("Webcam open — perform a BSL sign. Press ESC to quit.\n")
 # ── Shared state between main thread and inference thread ─────────────────────
 frame_buffer    = deque(maxlen=SEQUENCE_LEN)
 pred_buffer     = deque(maxlen=PRED_BUFFER_SIZE)
-prev_raw_frame  = ZERO_FRAME.copy()   # used for motion detection
 lock            = threading.Lock()
 
 # Output from inference thread
 infer_result    = {"word": None, "conf": 0.0}
 infer_pending   = threading.Event()   # signals the inference thread to run
+
+# ── Locked-word state ───────────────────────────────────────────────
+# Once a gesture crosses CONF_THRESHOLD it is "locked" and stays on screen
+# until a DIFFERENT gesture is detected or the hold timer expires.
+locked_word      = None   # word currently locked on screen
+locked_conf      = 0.0
+hold_frames_left = 0      # countdown frames while hand is absent
 
 # Pre-fill frame buffer
 for _ in range(SEQUENCE_LEN):
@@ -245,37 +249,46 @@ while cap.isOpened():
             draw_hand(frame, hand_lms)
 
     # ── Update landmark buffer ─────────────────────────────────────────────────
-    raw_frame = np.concatenate([h1, h2])
+    raw_frame  = np.concatenate([h1, h2])
     norm_frame = normalize_frame(raw_frame)
-
-    # ── Motion-change detection ───────────────────────────────────────────────
-    # Measure how much the landmark positions shifted since the last frame.
-    # A large shift = gesture change → flush stale predictions immediately.
-    if num_hands > 0:
-        motion = float(np.linalg.norm(raw_frame - prev_raw_frame))
-        if motion > MOTION_THRESHOLD:
-            with lock:
-                pred_buffer.clear()
-        prev_raw_frame = raw_frame.copy()
 
     with lock:
         frame_buffer.append(norm_frame)
-
-    if num_hands == 0:
-        pred_buffer.clear()
-        prev_raw_frame = ZERO_FRAME.copy()
 
     # ── Trigger inference (non-blocking, every INFER_EVERY frames) ───────────
     infer_frame += 1
     if num_hands > 0 and infer_frame % INFER_EVERY == 0:
         infer_pending.set()   # wake inference thread — returns immediately
 
-    # ── Consume last inference result if available ────────────────────────────
+    # ── Consume last inference result ─────────────────────────────────────
     if infer_result["word"] is not None and num_hands > 0:
         pred_buffer.append((infer_result["word"], infer_result["conf"]))
-        infer_result["word"] = None   # consume
+        infer_result["word"] = None
 
     smooth_word, smooth_conf = recency_weighted_prediction(pred_buffer)
+
+    # ── Lock-in logic ─────────────────────────────────────────────────────
+    if num_hands > 0:
+        hold_frames_left = 0   # hand is present — cancel any hold countdown
+
+        if smooth_word and smooth_conf >= CONF_THRESHOLD:
+            if smooth_word != locked_word:
+                # New gesture detected — switch immediately
+                pred_buffer.clear()   # flush old votes so next gesture starts fresh
+            locked_word = smooth_word
+            locked_conf = smooth_conf
+
+    else:
+        # Hand has left frame
+        pred_buffer.clear()
+        if locked_word is not None and hold_frames_left == 0:
+            # Start hold countdown
+            hold_frames_left = HOLD_FRAMES
+        elif hold_frames_left > 0:
+            hold_frames_left -= 1
+            if hold_frames_left == 0:
+                locked_word = None
+                locked_conf = 0.0
 
     # ── Draw UI ────────────────────────────────────────────────────────────────
     fw, fh = frame.shape[1], frame.shape[0]
@@ -288,30 +301,38 @@ while cap.isOpened():
     cv2.putText(frame, "LSTM (Optimised)", (fw - 230, 58),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 50), 1)
 
-    # Prediction display
-    if num_hands > 0 and smooth_word and smooth_conf >= CONF_THRESHOLD:
+    # ── Prediction display ────────────────────────────────────────────────────
+    if locked_word and num_hands > 0:
+        # Gesture actively locked — hand present
         wcolor = (0, 255, 180)
-        cv2.putText(frame, smooth_word.upper(),
+        cv2.putText(frame, locked_word.upper(),
                     (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 2.2, wcolor, 4)
-        cv2.putText(frame, f"{smooth_conf*100:.0f}% confident",
+        cv2.putText(frame, f"{locked_conf*100:.0f}% confident",
                     (10, 115), cv2.FONT_HERSHEY_SIMPLEX, 0.75, wcolor, 2)
 
-    elif num_hands > 0 and smooth_word:
-        wcolor = (80, 80, 200)
-        cv2.putText(frame, smooth_word.upper(),
+    elif locked_word and hold_frames_left > 0:
+        # Hand gone — fade out locked word over hold period
+        fade   = hold_frames_left / HOLD_FRAMES          # 1.0 → 0.0
+        bright = int(140 + 115 * fade)
+        wcolor = (0, bright, int(bright * 0.7))
+        cv2.putText(frame, locked_word.upper(),
                     (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 2.2, wcolor, 4)
-        cv2.putText(frame, f"{smooth_conf*100:.0f}% (low confidence)",
-                    (10, 115), cv2.FONT_HERSHEY_SIMPLEX, 0.65, wcolor, 1)
+        bar_total  = fw - 20
+        bar_filled = int(fade * bar_total)
+        cv2.rectangle(frame, (10, 125), (10 + bar_filled, 135), wcolor, -1)
+        cv2.rectangle(frame, (10, 125), (10 + bar_total, 135), (80, 80, 80), 1)
+        cv2.putText(frame, "Holding...",
+                    (10, 155), cv2.FONT_HERSHEY_SIMPLEX, 0.55, wcolor, 1)
 
-    elif num_hands == 0:
-        cv2.putText(frame, "No hand detected",
-                    (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+    elif num_hands == 0 and locked_word is None:
+        cv2.putText(frame, "Show a sign...",
+                    (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.1, (100, 100, 100), 2)
 
     # Hand count
     if num_hands > 0:
         h_color = (0, 255, 0) if num_hands == 2 else (0, 200, 255)
         cv2.putText(frame, f"{num_hands} hand(s)",
-                    (10, 145), cv2.FONT_HERSHEY_SIMPLEX, 0.6, h_color, 1)
+                    (10, 175), cv2.FONT_HERSHEY_SIMPLEX, 0.6, h_color, 1)
 
     # Word list at bottom
     words_text = "Signs: " + " | ".join(sorted(le.classes_))
