@@ -5,6 +5,8 @@ from mediapipe.tasks.python import vision
 import numpy as np
 import os
 import urllib.request
+import time
+import json
 
 """
 LSTM sequence data collection tool.
@@ -30,30 +32,45 @@ SEQ_DIR       = os.path.join(DATA_DIR, "lstm_sequences")
 SEQUENCE_LEN  = 30    # frames per sequence
 TARGET        = 200   # target sequences per word
 
-BSL_WORDS = {
-    "hello"    : "Open hand, wave side to side",
-    "thanks"   : "Flat hand from chin, move forward",
-    "good"     : "Thumbs up",
-    "bad"      : "Thumbs down",
-    "morning"  : "Flat hand rises upward (like sunrise)",
-    "afternoon": "Arm at 45° angle pointing forward",
-    "you"      : "Point index finger directly at camera",
-    "my"       : "Flat hand touches chest",
-    "your"     : "Point index finger away from you",
-    "name"     : "Two index fingers tap together",
-    "how"      : "Fists together, rotate outward",
-    "meet"     : "Both index fingers come together",
-    "home"     : "Flat hand on cheek",
-    "baby"     : "Cradle arms, rock side to side",
-    "mother"   : "M-hand touch chin",
-    "father"   : "F-hand touch forehead",
-    "brother"  : "Both B-hands side by side",
-    "sister"   : "Both S-hands, touch cheek then move out",
-    "son"      : "B-hand on forehead, then flat hand",
-    "daughter" : "D-hand on chin, then flat hand",
-    "luck"     : "L-hand twist at chin",
-    "step"     : "Both flat hands, alternate stepping motion",
-}
+# Countdown delay before recording starts (useful for two-handed signs)
+# Set USE_DELAY = False to disable
+USE_DELAY     = True
+DELAY_SECONDS = 1
+
+WORDS_FILE = "bsl_words.json"
+
+if not os.path.exists(WORDS_FILE):
+    # Default words if the file doesn't exist yet
+    default_words = {
+        "what"     : "Index finger extended, rock side to side",
+        "hello"    : "Open hand, wave side to side",
+        "thanks"   : "Flat hand from chin, move forward",
+        "good"     : "Thumbs up",
+        "bad"      : "Thumbs down",
+        "morning"  : "Flat hand rises upward (like sunrise)",
+        "afternoon": "Arm at 45° angle pointing forward",
+        "you"      : "Point index finger directly at camera",
+        "my"       : "Flat hand touches chest",
+        "your"     : "Point index finger away from you",
+        "name"     : "Two index fingers tap together",
+        "how"      : "Fists together, rotate outward",
+        "meet"     : "Both index fingers come together",
+        "home"     : "Flat hand on cheek",
+        "baby"     : "Cradle arms, rock side to side",
+        "mother"   : "M-hand touch chin",
+        "father"   : "F-hand touch forehead",
+        "brother"  : "Both B-hands side by side",
+        "sister"   : "Both S-hands, touch cheek then move out",
+        "son"      : "B-hand on forehead, then flat hand",
+        "daughter" : "D-hand on chin, then flat hand",
+        "luck"     : "L-hand twist at chin",
+        "step"     : "Both flat hands, alternate stepping motion"
+    }
+    with open(WORDS_FILE, "w") as f:
+        json.dump(default_words, f, indent=4)
+
+with open(WORDS_FILE, "r") as f:
+    BSL_WORDS = json.load(f)
 
 WORD_LIST  = list(BSL_WORDS.keys())
 ZERO_HAND  = [0.0] * 63
@@ -135,6 +152,8 @@ cap          = cv2.VideoCapture(0, cv2.CAP_DSHOW)
 word_idx     = 0
 recording    = False
 frame_buffer = []   # accumulates frames during recording
+countdown_active = False
+countdown_start_time = 0
 
 sample_counts = {w: count_sequences(w) for w in WORD_LIST}
 
@@ -173,6 +192,23 @@ while cap.isOpened():
     current_word  = WORD_LIST[word_idx]
     current_count = sample_counts[current_word]
     hint          = BSL_WORDS[current_word]
+
+    # ── Countdown logic ────────────────────────────────────────────────────────
+    if countdown_active:
+        elapsed = time.time() - countdown_start_time
+        remaining = DELAY_SECONDS - elapsed
+        if remaining <= 0:
+            countdown_active = False
+            if num_hands > 0:
+                recording = True
+                frame_buffer = []
+                print(f"\n  ● Recording {current_word}...")
+            else:
+                print("  ✗ No hand detected after countdown — cancelled")
+        else:
+            cv2.putText(frame, f"Starting in {int(np.ceil(remaining))}...",
+                        (frame.shape[1]//2 - 180, frame.shape[0]//2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 165, 255), 4)
 
     # ── Recording logic ────────────────────────────────────────────────────────
     if recording:
@@ -255,18 +291,24 @@ while cap.isOpened():
         break
 
     elif key == ord(' '):
-        if not recording:
-            if num_hands > 0:
-                recording    = True
-                frame_buffer = []
-                print(f"\n  ● Recording {current_word}...")
+        if not recording and not countdown_active:
+            if USE_DELAY and DELAY_SECONDS > 0:
+                countdown_active = True
+                countdown_start_time = time.time()
+                print(f"\n  ⏱ Starting in {DELAY_SECONDS} seconds... Get ready!")
             else:
-                print("  ✗ No hand detected — show your hand first")
+                if num_hands > 0:
+                    recording    = True
+                    frame_buffer = []
+                    print(f"\n  ● Recording {current_word}...")
+                else:
+                    print("  ✗ No hand detected — show your hand first")
         else:
-            # Cancel recording
+            # Cancel recording or countdown
             recording    = False
+            countdown_active = False
             frame_buffer = []
-            print("  ✗ Recording cancelled")
+            print("  ✗ Recording / Countdown cancelled")
 
     elif key in (ord('n'), ord('N')):
         word_idx = (word_idx + 1) % len(WORD_LIST)
