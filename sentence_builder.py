@@ -31,7 +31,7 @@ def _load_api_key() -> str | None:
                 return key
     return None
 
-# Use the requested Gemma model
+# Use the ultra-fast 8B model which has the highest rate limits on the free tier
 GEMINI_MODEL = "gemma-4-26b-a4b-it"
 API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key="
 
@@ -51,7 +51,9 @@ Examples (the input order can be shuffled):
   [good, morning]      → "Good morning."
   [how, you]           → "How are you?"
 
+
 STRICT RULES:
+- Print the sentence first...before anything else.
 - Output ONLY the final English sentence.
 - No explanation, no alternatives, no label.
 - Use correct capitalisation and punctuation.
@@ -87,42 +89,80 @@ class SentenceBuilder:
             return ' '.join(words)
 
         print(f"  → Gemini ← {words}")
-        try:
-            url = API_URL + self._api_key
-            prompt = f"BSL signs to translate: {words}"
-            
-            data = {
-                "system_instruction": {
-                    "parts": [{"text": INSTRUCTION}]
+        url = API_URL + self._api_key
+        
+        data = {
+            "system_instruction": {
+                "parts": [{"text": INSTRUCTION}]
+            },
+            "contents": [
+                {
+                    "role": "user", 
+                    "parts": [{"text": "BSL signs to translate: ['home', 'I', 'go']\n\nReturn EXACTLY and ONLY the final english sentence. No thinking, no markdown, no bullet points, no 'Result:' labels."}]
                 },
-                "contents": [
-                    {
-                        "parts": [{"text": prompt}]
-                    }
-                ]
+                {
+                    "role": "model", 
+                    "parts": [{"text": "I am going home."}]
+                },
+                {
+                    "role": "user",
+                    "parts": [{"text": f"BSL signs to translate: {words}\n\nReturn EXACTLY and ONLY the final english sentence. No thinking, no markdown, no bullet points, no 'Result:' labels."}]
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.1,
+                "maxOutputTokens": 64
             }
-            
-            req = urllib.request.Request(url, data=json.dumps(data).encode("utf-8"))
-            req.add_header("Content-Type", "application/json")
-            
-            with urllib.request.urlopen(req) as response:
-                result_json = json.loads(response.read().decode("utf-8"))
+        }
+        
+        encoded_data = json.dumps(data).encode("utf-8")
+        
+        for attempt in range(3):
+            try:
+                req = urllib.request.Request(url, data=encoded_data)
+                req.add_header("Content-Type", "application/json")
                 
-                # Parse response
-                result = result_json["candidates"][0]["content"]["parts"][0]["text"].strip()
-                
-                # Remove any wrapping quotes that Gemini might add
-                if result.startswith('"') and result.endswith('"'):
-                    result = result[1:-1]
+                with urllib.request.urlopen(req) as response:
+                    result_json = json.loads(response.read().decode("utf-8"))
                     
-                print(f"  ✓ Gemini → \"{result}\"")
-                return result
+                    # Parse response
+                    result = result_json["candidates"][0]["content"]["parts"][0]["text"].strip()
+                    
+                    # --- HOTFIX FOR GEMMA 4 CHAIN-OF-THOUGHT ---
+                    # If the model ignores the instruction and prints paragraphs with bullet points,
+                    # simply grab the very final phrase which usually contains the sentence we want.
+                    if '\n' in result:
+                        lines = [line.strip() for line in result.split('\n') if line.strip()]
+                        if lines:
+                            result = lines[-1]
+                            
+                    # Remove markdown elements e.g., `* ` or `- `
+                    if result.startswith('*   '):
+                        result = result[4:]
+                    elif result.startswith('* '):
+                        result = result[2:]
+                        
+                    # Remove any wrapping quotes that Gemini might add
+                    if result.startswith('"') and result.endswith('"'):
+                        result = result[1:-1]
+                        
+                    print(f"  ✓ Gemini → \"{result}\"")
+                    return result
+                    
+            except urllib.error.HTTPError as e:
+                import time
+                err_msg = e.read().decode("utf-8")
                 
-        except urllib.error.HTTPError as e:
-            err_msg = e.read().decode("utf-8")
-            print(f"  ⚠  Gemini API error ({e.code}): {err_msg}")
-            return ' '.join(words)
-        except Exception as e:
-            print(f"  ⚠  Gemini API error: {e}")
-            return ' '.join(words)
+                if e.code == 429:
+                    print(f"  ⚠  Rate limited (429). Retrying in 2 seconds (Attempt {attempt+1}/3)...")
+                    time.sleep(2)
+                    continue
+                else:
+                    print(f"  ⚠  Gemini API error ({e.code}): {err_msg}")
+                    return ' '.join(words)
+            except Exception as e:
+                print(f"  ⚠  Gemini API error: {e}")
+                return ' '.join(words)
+                
+        return ' '.join(words)
 
