@@ -4,28 +4,26 @@ import os
 import pickle
 import urllib.request
 import threading
+import time
 from collections import deque, Counter
 import mediapipe as mp
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision
 import tensorflow as tf
 
+from sentence_builder import SentenceBuilder
+
 """
-Live BSL detection using the LSTM sequence model.
-
-Optimisations over v1:
-  1. Inference runs in a background thread — camera read loop never blocks.
-  2. Motion-change detection — if the hand moves significantly between frames,
-     the smoothing buffer is flushed immediately so the new gesture registers
-     without waiting for old predictions to decay.
-  3. Recency-weighted smoothing — recent predictions count more than old ones.
-  4. model(seq) called directly (no Python overhead of .predict()).
-
-Run from the hands/ folder:
-    python test_detection_lstm.py
+BSL LSTM Translator — Word Detection + Sentence Formation
+=========================================================
+Runs the LSTM sign detector and feeds confirmed words into a sentence
+accumulator. When signing pauses, GPT-2 reorders the BSL word sequence
+into the most probable English sentence.
 
 Controls:
   ESC  — quit
+  C    — clear word buffer and sentence
+  Z    — undo last committed word
 """
 
 # ── Config ─────────────────────────────────────────────────────────────────────
@@ -36,20 +34,24 @@ MP_MODEL_FILE  = os.path.join(DATA_DIR, "hand_landmarker.task")
 MP_MODEL_URL   = ("https://storage.googleapis.com/mediapipe-models/"
                   "hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task")
 
-SEQUENCE_LEN      = 30     # must match training
+SEQUENCE_LEN      = 30
 FEATURE_DIM       = 126
-CONF_THRESHOLD    = 0.60   # min confidence to lock a prediction
-
-# How many frames to keep showing the last word after the hand leaves frame.
-# ~90 frames ≈ 3 seconds at 30 fps. Set to 0 to disable.
+CONF_THRESHOLD    = 0.60
 HOLD_FRAMES       = 90
-
-# Number of recent raw predictions kept for smoothing.
 PRED_BUFFER_SIZE  = 3
+INFER_EVERY       = 2
+
+# ── Word accumulator ───────────────────────────────────────────────────────────
+# How many frames the LSTM must continuously predict the SAME word
+# (above CONF_THRESHOLD) before it is committed to the sentence buffer.
+COMMIT_FRAMES    = 25    # ~0.8s at 30 fps
+COMMIT_COOLDOWN  = 50    # frames to ignore after committing (~1.7s)
+SENTENCE_TIMEOUT = 90    # frames of no hand → sentence complete (~3s)
+MAX_BUFFER_WORDS = 7     # auto-complete after this many words
 
 ZERO_FRAME = np.zeros(FEATURE_DIM, dtype=np.float32)
 
-# ── Hand skeleton connections ──────────────────────────────────────────────────
+# ── Hand skeleton ──────────────────────────────────────────────────────────────
 HAND_CONNECTIONS = [
     (0,1),(1,2),(2,3),(3,4),
     (0,5),(5,6),(6,7),(7,8),
@@ -81,9 +83,8 @@ def normalize_hand(hand_vec):
 
 
 def normalize_frame(frame_vec):
-    h1 = normalize_hand(frame_vec[:63])
-    h2 = normalize_hand(frame_vec[63:])
-    return np.concatenate([h1, h2])
+    return np.concatenate([normalize_hand(frame_vec[:63]),
+                           normalize_hand(frame_vec[63:])])
 
 
 def get_left_right(detection_result):
@@ -105,6 +106,23 @@ def get_left_right(detection_result):
            (right if right is not None else zeros.copy())
 
 
+# ── Drawing helpers ────────────────────────────────────────────────────────────
+def draw_panel(img, x1, y1, x2, y2, color=(10, 20, 40), alpha=0.72):
+    """Semi-transparent filled rectangle."""
+    overlay = img.copy()
+    cv2.rectangle(overlay, (x1, y1), (x2, y2), color, -1)
+    cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
+
+
+def put_shadow(img, text, pos, scale, color, thickness=2):
+    """Text with drop shadow for readability."""
+    x, y = pos
+    cv2.putText(img, text, (x+2, y+2), cv2.FONT_HERSHEY_SIMPLEX,
+                scale, (0, 0, 0), thickness+1, cv2.LINE_AA)
+    cv2.putText(img, text, pos, cv2.FONT_HERSHEY_SIMPLEX,
+                scale, color, thickness, cv2.LINE_AA)
+
+
 # ── Download MediaPipe model ───────────────────────────────────────────────────
 os.makedirs(DATA_DIR, exist_ok=True)
 if not os.path.exists(MP_MODEL_FILE):
@@ -114,7 +132,7 @@ if not os.path.exists(MP_MODEL_FILE):
 
 # ── Load LSTM model ────────────────────────────────────────────────────────────
 print("=" * 60)
-print("  BSL LSTM Live Detection  (Optimised)")
+print("  BSL LSTM Translator  (Word Accumulator + Sentence Formation)")
 print("=" * 60)
 
 if not os.path.exists(MODEL_PATH) or not os.path.exists(ENCODER_PATH):
@@ -124,15 +142,17 @@ if not os.path.exists(MODEL_PATH) or not os.path.exists(ENCODER_PATH):
     exit(1)
 
 model = tf.keras.models.load_model(MODEL_PATH)
-# Warm up the model so the first real inference isn't slow
 _dummy = np.zeros((1, SEQUENCE_LEN, FEATURE_DIM), dtype=np.float32)
 _ = model(_dummy, training=False)
 
 with open(ENCODER_PATH, 'rb') as f:
     le = pickle.load(f)
 
-print(f"\n✓ LSTM model loaded — {len(le.classes_)} classes")
-print(f"  Words: {', '.join(le.classes_)}\n")
+print(f"\n✓ LSTM model  — {len(le.classes_)} classes: {', '.join(le.classes_)}")
+
+# ── Sentence builder (loads GPT-2 in background) ──────────────────────────────
+print("\n  Starting GPT-2 sentence builder in background...")
+sentence_builder = SentenceBuilder()
 
 # ── MediaPipe ──────────────────────────────────────────────────────────────────
 options = vision.HandLandmarkerOptions(
@@ -148,39 +168,29 @@ landmarker = vision.HandLandmarker.create_from_options(options)
 cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-print("Webcam open — perform a BSL sign. Press ESC to quit.\n")
+print("\nWebcam open. ESC: quit   C: clear   Z: undo\n")
 
-# ── Shared state between main thread and inference thread ─────────────────────
+# ── Shared LSTM inference state ────────────────────────────────────────────────
 frame_buffer    = deque(maxlen=SEQUENCE_LEN)
 pred_buffer     = deque(maxlen=PRED_BUFFER_SIZE)
 lock            = threading.Lock()
-
-# Output from inference thread
 infer_result    = {"word": None, "conf": 0.0}
-infer_pending   = threading.Event()   # signals the inference thread to run
+infer_pending   = threading.Event()
 
-# ── Locked-word state ───────────────────────────────────────────────
-# Once a gesture crosses CONF_THRESHOLD it is "locked" and stays on screen
-# until a DIFFERENT gesture is detected or the hold timer expires.
-locked_word      = None   # word currently locked on screen
+locked_word      = None
 locked_conf      = 0.0
-hold_frames_left = 0      # countdown frames while hand is absent
+hold_frames_left = 0
 
-# Pre-fill frame buffer
 for _ in range(SEQUENCE_LEN):
     frame_buffer.append(ZERO_FRAME.copy())
 
 
-# ── Inference thread ─────────────────────────────────────────────────────────
 def inference_worker():
-    """Runs LSTM inference in a background thread to keep the camera loop smooth."""
     while True:
-        infer_pending.wait()          # block until main thread signals
+        infer_pending.wait()
         infer_pending.clear()
-
         with lock:
-            seq = np.array(frame_buffer, dtype=np.float32)[np.newaxis]  # (1,30,126)
-
+            seq = np.array(frame_buffer, dtype=np.float32)[np.newaxis]
         proba = model(seq, training=False).numpy()[0]
         idx   = int(np.argmax(proba))
         infer_result["word"] = le.classes_[idx]
@@ -190,59 +200,90 @@ def inference_worker():
 infer_thread = threading.Thread(target=inference_worker, daemon=True)
 infer_thread.start()
 
-# ── Smoothing helpers ─────────────────────────────────────────────────────────
+
 def recency_weighted_prediction(buf):
-    """
-    Weight recent predictions more heavily than older ones.
-    Returns (word, weighted_confidence).
-    """
     if not buf:
         return None, 0.0
-
-    items    = list(buf)
-    n        = len(items)
-    # Weights: oldest = 1, newest = n  (linear ramp)
-    weights  = np.arange(1, n + 1, dtype=np.float32)
-
+    items   = list(buf)
+    n       = len(items)
+    weights = np.arange(1, n + 1, dtype=np.float32)
     word_scores = {}
     for w, (word, conf) in zip(weights, items):
         word_scores.setdefault(word, 0.0)
         word_scores[word] += w * conf
-
-    best_word = max(word_scores, key=word_scores.__getitem__)
-    # Normalised average confidence for the winning word
+    best_word   = max(word_scores, key=word_scores.__getitem__)
     win_weights = [weights[i] for i, (word, _) in enumerate(items) if word == best_word]
     win_confs   = [conf       for (word, conf)   in items           if word == best_word]
     avg_conf    = float(np.dot(win_weights, win_confs) / sum(win_weights))
-
     return best_word, avg_conf
 
 
-# ── FPS tracking ─────────────────────────────────────────────────────────────
-import time
-fps_buf      = deque(maxlen=30)
-last_t       = time.perf_counter()
-infer_frame  = 0   # frame counter for skipping inference every Nth frame
-INFER_EVERY  = 2   # run inference every 2nd frame (halves GPU load)
+# ── Word accumulator state ─────────────────────────────────────────────────────
+word_buffer      = []    # committed words this sentence
+commit_word      = None  # word currently building toward commit
+commit_frames    = 0     # frames current commit_word has been predicted
+commit_cooldown  = 0     # post-commit cooldown frames
+no_hand_timer    = 0     # frames since last hand detection
 
-# ── Main loop ─────────────────────────────────────────────────────────────────
+# ── Sentence state ─────────────────────────────────────────────────────────────
+last_sentence    = ""
+sentence_building = False
+lock_flash        = 0
+
+
+def _run_sentence_builder(words):
+    global last_sentence, sentence_building
+    result        = sentence_builder.build(list(words))
+    last_sentence = result
+    sentence_building = False
+    print(f'\n  ✓ Sentence: "{result}"')
+
+
+def complete_sentence():
+    global sentence_building, word_buffer, last_sentence
+    global commit_word, commit_frames, commit_cooldown, no_hand_timer
+    if not word_buffer:
+        return
+    print(f"  Signing complete → words: {word_buffer}")
+    words_copy = list(word_buffer)
+    if sentence_builder.ready:
+        sentence_building = True
+        t = threading.Thread(
+            target=_run_sentence_builder, args=(words_copy,), daemon=True
+        )
+        t.start()
+    else:
+        last_sentence = ' '.join(words_copy)
+    word_buffer.clear()
+    commit_word   = None
+    commit_frames = 0
+    commit_cooldown = 0
+    no_hand_timer   = 0
+
+
+# ── FPS ────────────────────────────────────────────────────────────────────────
+fps_buf     = deque(maxlen=30)
+last_t      = time.perf_counter()
+infer_frame = 0
+
+# ── Main loop ──────────────────────────────────────────────────────────────────
 while cap.isOpened():
     ret, frame = cap.read()
     if not ret:
         break
 
-    # FPS
     now = time.perf_counter()
     fps_buf.append(1.0 / max(now - last_t, 1e-6))
     last_t = now
-    fps = np.mean(fps_buf)
+    fps    = np.mean(fps_buf)
 
     frame = cv2.flip(frame, 1)
     rgb   = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    H, W  = frame.shape[:2]
 
-    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+    mp_image     = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
     timestamp_ms = int(time.time() * 1000)
-    result   = landmarker.detect_for_video(mp_image, timestamp_ms)
+    result       = landmarker.detect_for_video(mp_image, timestamp_ms)
 
     h1, h2    = get_left_right(result)
     num_hands = len(result.hand_landmarks) if result.hand_landmarks else 0
@@ -251,41 +292,40 @@ while cap.isOpened():
         for hand_lms in result.hand_landmarks:
             draw_hand(frame, hand_lms)
 
-    # ── Update landmark buffer ─────────────────────────────────────────────────
+    # ── Lock flash overlay ─────────────────────────────────────────────────────
+    if lock_flash > 0:
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (0, 0), (W, H), (0, 255, 120), -1)
+        cv2.addWeighted(overlay, 0.18, frame, 0.82, 0, frame)
+        lock_flash -= 1
+
+    # ── LSTM frame buffer + inference ──────────────────────────────────────────
     raw_frame  = np.concatenate([h1, h2])
     norm_frame = normalize_frame(raw_frame)
-
     with lock:
         frame_buffer.append(norm_frame)
 
-    # ── Trigger inference (non-blocking, every INFER_EVERY frames) ───────────
     infer_frame += 1
     if num_hands > 0 and infer_frame % INFER_EVERY == 0:
-        infer_pending.set()   # wake inference thread — returns immediately
+        infer_pending.set()
 
-    # ── Consume last inference result ─────────────────────────────────────
     if infer_result["word"] is not None and num_hands > 0:
         pred_buffer.append((infer_result["word"], infer_result["conf"]))
         infer_result["word"] = None
 
     smooth_word, smooth_conf = recency_weighted_prediction(pred_buffer)
 
-    # ── Lock-in logic ─────────────────────────────────────────────────────
+    # ── LSTM lock-in (unchanged from original) ────────────────────────────────
     if num_hands > 0:
-        hold_frames_left = 0   # hand is present — cancel any hold countdown
-
+        hold_frames_left = 0
         if smooth_word and smooth_conf >= CONF_THRESHOLD:
             if smooth_word != locked_word:
-                # New gesture detected — switch immediately
-                pred_buffer.clear()   # flush old votes so next gesture starts fresh
+                pred_buffer.clear()
             locked_word = smooth_word
             locked_conf = smooth_conf
-
     else:
-        # Hand has left frame
         pred_buffer.clear()
         if locked_word is not None and hold_frames_left == 0:
-            # Start hold countdown
             hold_frames_left = HOLD_FRAMES
         elif hold_frames_left > 0:
             hold_frames_left -= 1
@@ -293,59 +333,153 @@ while cap.isOpened():
                 locked_word = None
                 locked_conf = 0.0
 
-    # ── Draw UI ────────────────────────────────────────────────────────────────
-    fw, fh = frame.shape[1], frame.shape[0]
+    # ── Word accumulator (built on top of LSTM lock-in) ───────────────────────
+    if num_hands > 0 and locked_word:
+        no_hand_timer = 0
 
-    # FPS counter (top right)
-    cv2.putText(frame, f"FPS: {fps:.0f}", (fw - 120, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (180, 180, 50), 2)
+        if commit_cooldown > 0:
+            commit_cooldown -= 1
+        else:
+            # Track stability of locked_word
+            if locked_word == commit_word:
+                commit_frames += 1
+            else:
+                commit_word   = locked_word
+                commit_frames = 1
 
-    # Model label
-    cv2.putText(frame, "LSTM (Optimised)", (fw - 230, 58),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 50), 1)
+            # Commit when stable long enough
+            if commit_frames >= COMMIT_FRAMES:
+                word_buffer.append(commit_word)
+                print(f"  + Committed: {commit_word}  [{' → '.join(word_buffer)}]")
+                lock_flash      = 5
+                commit_cooldown = COMMIT_COOLDOWN
+                commit_frames   = 0
+                if len(word_buffer) >= MAX_BUFFER_WORDS:
+                    complete_sentence()
 
-    # ── Prediction display ────────────────────────────────────────────────────
+    elif num_hands == 0 and hold_frames_left == 0:
+        # Hand fully gone (hold expired)
+        no_hand_timer += 1
+        commit_frames  = 0
+        commit_word    = None
+        if no_hand_timer >= SENTENCE_TIMEOUT and word_buffer:
+            complete_sentence()
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # DRAWING
+    # ══════════════════════════════════════════════════════════════════════════
+
+    # ── FPS + model label (top right) ─────────────────────────────────────────
+    put_shadow(frame, f"FPS: {fps:.0f}", (W - 120, 30), 0.65, (180, 180, 50))
+    put_shadow(frame, "LSTM + Sentence", (W - 210, 58), 0.5, (200, 200, 50))
+
+    # ── GPT-2 ready indicator ─────────────────────────────────────────────────
+    if sentence_builder.loading:
+        put_shadow(frame, "GPT-2 loading...", (10, 22), 0.48, (255, 200, 50))
+    else:
+        cv2.circle(frame, (14, 18), 6, (0, 200, 100), -1)
+
+    # ── Word display (LSTM prediction — existing style) ───────────────────────
     if locked_word and num_hands > 0:
-        # Gesture actively locked — hand present
         wcolor = (0, 255, 180)
-        cv2.putText(frame, locked_word.upper(),
-                    (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 2.2, wcolor, 4)
-        cv2.putText(frame, f"{locked_conf*100:.0f}% confident",
-                    (10, 115), cv2.FONT_HERSHEY_SIMPLEX, 0.75, wcolor, 2)
+        put_shadow(frame, locked_word.upper(), (10, 80), 2.2, wcolor, 4)
+        put_shadow(frame, f"{locked_conf*100:.0f}% confident", (10, 115), 0.75, wcolor, 2)
 
     elif locked_word and hold_frames_left > 0:
-        # Hand gone — fade out locked word over hold period
-        fade   = hold_frames_left / HOLD_FRAMES          # 1.0 → 0.0
+        fade   = hold_frames_left / HOLD_FRAMES
         bright = int(140 + 115 * fade)
         wcolor = (0, bright, int(bright * 0.7))
-        cv2.putText(frame, locked_word.upper(),
-                    (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 2.2, wcolor, 4)
-        bar_total  = fw - 20
+        put_shadow(frame, locked_word.upper(), (10, 80), 2.2, wcolor, 4)
+        bar_total  = W - 20
         bar_filled = int(fade * bar_total)
         cv2.rectangle(frame, (10, 125), (10 + bar_filled, 135), wcolor, -1)
         cv2.rectangle(frame, (10, 125), (10 + bar_total, 135), (80, 80, 80), 1)
-        cv2.putText(frame, "Holding...",
-                    (10, 155), cv2.FONT_HERSHEY_SIMPLEX, 0.55, wcolor, 1)
+        put_shadow(frame, "Holding...", (10, 152), 0.55, wcolor, 1)
 
     elif num_hands == 0 and locked_word is None:
-        cv2.putText(frame, "Show a sign...",
-                    (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.1, (100, 100, 100), 2)
+        put_shadow(frame, "Show a sign...", (10, 80), 1.1, (100, 100, 100), 2)
 
-    # Hand count
+    # ── Commit stability bar ───────────────────────────────────────────────────
+    if commit_word and num_hands > 0 and commit_cooldown == 0:
+        bar_x1, bar_y1 = 10, 162
+        bar_x2, bar_y2 = W - 10, 182
+        progress = min(commit_frames / COMMIT_FRAMES, 1.0)
+        filled_w = int(progress * (bar_x2 - bar_x1))
+
+        draw_panel(frame, bar_x1 - 2, bar_y1 - 14,
+                   bar_x2 + 2, bar_y2 + 2, (20, 20, 20), alpha=0.65)
+        if filled_w > 0:
+            cv2.rectangle(frame, (bar_x1, bar_y1),
+                          (bar_x1 + filled_w, bar_y2), (0, 220, 120), -1)
+        cv2.rectangle(frame, (bar_x1, bar_y1),
+                      (bar_x2, bar_y2), (150, 150, 150), 1)
+        remaining_s = (COMMIT_FRAMES - commit_frames) / 30
+        lbl = (f"Committing: {commit_word.upper()} ({remaining_s:.1f}s)"
+               if progress < 1.0 else f"Committed: {commit_word.upper()}!")
+        put_shadow(frame, lbl, (bar_x1 + 4, bar_y1 - 2), 0.46, (200, 255, 200), 1)
+
+    elif commit_cooldown > 0 and num_hands > 0:
+        put_shadow(frame, "Move to next sign...", (10, 167), 0.48, (180, 180, 80), 1)
+
+    # ── No-hand countdown ─────────────────────────────────────────────────────
+    if num_hands == 0 and hold_frames_left == 0 and word_buffer:
+        remaining = max(0, SENTENCE_TIMEOUT - no_hand_timer)
+        put_shadow(frame, f"Completing sentence in {remaining/30:.1f}s",
+                   (10, 195), 0.5, (180, 120, 50), 1)
+
+    # ── Hand count ────────────────────────────────────────────────────────────
     if num_hands > 0:
         h_color = (0, 255, 0) if num_hands == 2 else (0, 200, 255)
-        cv2.putText(frame, f"{num_hands} hand(s)",
-                    (10, 175), cv2.FONT_HERSHEY_SIMPLEX, 0.6, h_color, 1)
+        put_shadow(frame, f"{num_hands} hand(s)", (10, 210), 0.55, h_color, 1)
 
-    # Word list at bottom
-    words_text = "Signs: " + " | ".join(sorted(le.classes_))
-    cv2.putText(frame, words_text, (10, fh - 15),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.36, (0, 200, 200), 1)
+    # ── Word buffer panel ──────────────────────────────────────────────────────
+    buf_y = H - 125
+    draw_panel(frame, 5, buf_y, W - 5, buf_y + 42)
+    if word_buffer:
+        buf_text = "  ➜  ".join(w.upper() for w in word_buffer)
+        put_shadow(frame, buf_text, (12, buf_y + 28), 0.72, (0, 200, 255), 2)
+    else:
+        put_shadow(frame, "(sign a word to begin...)",
+                   (12, buf_y + 26), 0.6, (100, 100, 100), 1)
 
-    cv2.imshow("BSL LSTM Detector  (ESC to quit)", frame)
+    # ── Sentence panel ─────────────────────────────────────────────────────────
+    sent_y = H - 75
+    draw_panel(frame, 5, sent_y, W - 5, sent_y + 45, color=(10, 10, 30), alpha=0.80)
+    if sentence_building:
+        dots = "." * ((int(time.time() * 2)) % 4)
+        put_shadow(frame, f"Building sentence{dots}", (12, sent_y + 30),
+                   0.72, (255, 200, 50), 2)
+    elif last_sentence:
+        put_shadow(frame, f'"{last_sentence}"', (12, sent_y + 30),
+                   0.80, (255, 255, 160), 2)
+    else:
+        put_shadow(frame, "(sentence will appear here)",
+                   (12, sent_y + 30), 0.6, (80, 80, 80), 1)
 
-    if cv2.waitKey(1) & 0xFF == 27:
+    # ── Bottom hints ───────────────────────────────────────────────────────────
+    put_shadow(frame, "ESC: quit   C: clear   Z: undo",
+               (10, H - 8), 0.38, (150, 150, 150), 1)
+
+    cv2.imshow("BSL LSTM Translator", frame)
+
+    key = cv2.waitKey(1) & 0xFF
+
+    if key == 27:   # ESC
         break
+
+    elif key in (ord('c'), ord('C')):
+        word_buffer.clear()
+        last_sentence    = ""
+        commit_word      = None
+        commit_frames    = 0
+        commit_cooldown  = 0
+        no_hand_timer    = 0
+        print("  Cleared.")
+
+    elif key in (ord('z'), ord('Z')):
+        if word_buffer:
+            removed = word_buffer.pop()
+            print(f"  Undone: {removed}")
 
 # ── Cleanup ────────────────────────────────────────────────────────────────────
 cap.release()
