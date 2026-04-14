@@ -281,16 +281,22 @@ while cap.isOpened():
     rgb   = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     H, W  = frame.shape[:2]
 
-    mp_image     = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-    timestamp_ms = int(time.time() * 1000)
-    result       = landmarker.detect_for_video(mp_image, timestamp_ms)
+    if sentence_building:
+        # Pause hand detection while Gemini API is fetching the sentence
+        h1 = np.zeros(63, dtype=np.float32)
+        h2 = np.zeros(63, dtype=np.float32)
+        num_hands = 0
+    else:
+        mp_image     = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        timestamp_ms = int(time.time() * 1000)
+        result       = landmarker.detect_for_video(mp_image, timestamp_ms)
 
-    h1, h2    = get_left_right(result)
-    num_hands = len(result.hand_landmarks) if result.hand_landmarks else 0
+        h1, h2    = get_left_right(result)
+        num_hands = len(result.hand_landmarks) if result.hand_landmarks else 0
 
-    if result.hand_landmarks:
-        for hand_lms in result.hand_landmarks:
-            draw_hand(frame, hand_lms)
+        if result.hand_landmarks:
+            for hand_lms in result.hand_landmarks:
+                draw_hand(frame, hand_lms)
 
     # ── Lock flash overlay ─────────────────────────────────────────────────────
     if lock_flash > 0:
@@ -354,16 +360,14 @@ while cap.isOpened():
                 lock_flash      = 5
                 commit_cooldown = COMMIT_COOLDOWN
                 commit_frames   = 0
-                if len(word_buffer) >= MAX_BUFFER_WORDS:
-                    complete_sentence()
+                # Auto-complete removed; waiting for explicit ENTER press.
 
     elif num_hands == 0 and hold_frames_left == 0:
         # Hand fully gone (hold expired)
         no_hand_timer += 1
         commit_frames  = 0
         commit_word    = None
-        if no_hand_timer >= SENTENCE_TIMEOUT and word_buffer:
-            complete_sentence()
+        # Auto-timeout removed; waiting for explicit ENTER press.
 
     # ══════════════════════════════════════════════════════════════════════════
     # DRAWING
@@ -423,9 +427,8 @@ while cap.isOpened():
 
     # ── No-hand countdown ─────────────────────────────────────────────────────
     if num_hands == 0 and hold_frames_left == 0 and word_buffer:
-        remaining = max(0, SENTENCE_TIMEOUT - no_hand_timer)
-        put_shadow(frame, f"Completing sentence in {remaining/30:.1f}s",
-                   (10, 195), 0.5, (180, 120, 50), 1)
+        put_shadow(frame, "Press ENTER to build sentence",
+                   (10, 195), 0.5, (100, 255, 100), 1)
 
     # ── Hand count ────────────────────────────────────────────────────────────
     if num_hands > 0:
@@ -457,7 +460,7 @@ while cap.isOpened():
                    (12, sent_y + 30), 0.6, (80, 80, 80), 1)
 
     # ── Bottom hints ───────────────────────────────────────────────────────────
-    put_shadow(frame, "ESC: quit   C: clear   Z: undo",
+    put_shadow(frame, "ENTER: build   ESC: quit   C: clear   Z: undo",
                (10, H - 8), 0.38, (150, 150, 150), 1)
 
     cv2.imshow("BSL LSTM Translator", frame)
@@ -466,6 +469,9 @@ while cap.isOpened():
 
     if key == 27:   # ESC
         break
+
+    elif key == 13: # ENTER
+        complete_sentence()
 
     elif key in (ord('c'), ord('C')):
         word_buffer.clear()
