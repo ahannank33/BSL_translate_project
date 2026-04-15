@@ -10,6 +10,9 @@ import mediapipe as mp
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision
 import tensorflow as tf
+import soundfile as sf
+import sounddevice as sd
+from kokoro_onnx import Kokoro
 
 from sentence_builder import SentenceBuilder
 
@@ -33,6 +36,10 @@ ENCODER_PATH   = os.path.join(DATA_DIR, "lstm_label_encoder.pkl")
 MP_MODEL_FILE  = os.path.join(DATA_DIR, "hand_landmarker.task")
 MP_MODEL_URL   = ("https://storage.googleapis.com/mediapipe-models/"
                   "hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task")
+KOKORO_MODEL_FILE = os.path.join(DATA_DIR, "kokoro-v1.0.onnx")
+KOKORO_MODEL_URL  = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx"
+KOKORO_VOICES_FILE = os.path.join(DATA_DIR, "voices-v1.0.bin")
+KOKORO_VOICES_URL  = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin"
 
 SEQUENCE_LEN      = 30
 FEATURE_DIM       = 126
@@ -114,8 +121,15 @@ def draw_panel(img, x1, y1, x2, y2, color=(10, 20, 40), alpha=0.72):
     cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
 
 
-def put_shadow(img, text, pos, scale, color, thickness=2):
+def put_shadow(img, text, pos, scale, color, thickness=2, max_width=None):
     """Text with drop shadow for readability."""
+    if max_width:
+        while scale > 0.35:
+            tw = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)[0][0]
+            if tw <= max_width:
+                break
+            scale -= 0.02
+
     x, y = pos
     cv2.putText(img, text, (x+2, y+2), cv2.FONT_HERSHEY_SIMPLEX,
                 scale, (0, 0, 0), thickness+1, cv2.LINE_AA)
@@ -129,6 +143,16 @@ if not os.path.exists(MP_MODEL_FILE):
     print("Downloading MediaPipe hand model...")
     urllib.request.urlretrieve(MP_MODEL_URL, MP_MODEL_FILE)
     print(f"✓ Saved to {MP_MODEL_FILE}")
+
+if not os.path.exists(KOKORO_MODEL_FILE):
+    print(f"Downloading Kokoro TTS model (this might take a minute)...")
+    urllib.request.urlretrieve(KOKORO_MODEL_URL, KOKORO_MODEL_FILE)
+    print(f"✓ Saved to {KOKORO_MODEL_FILE}")
+
+if not os.path.exists(KOKORO_VOICES_FILE):
+    print(f"Downloading Kokoro TTS voices...")
+    urllib.request.urlretrieve(KOKORO_VOICES_URL, KOKORO_VOICES_FILE)
+    print(f"✓ Saved to {KOKORO_VOICES_FILE}")
 
 # ── Load LSTM model ────────────────────────────────────────────────────────────
 print("=" * 60)
@@ -153,6 +177,25 @@ print(f"\n✓ LSTM model  — {len(le.classes_)} classes: {', '.join(le.classes_
 # ── Sentence builder (loads GPT-2 in background) ──────────────────────────────
 print("\n  Starting GPT-2 sentence builder in background...")
 sentence_builder = SentenceBuilder()
+
+print("\n  Starting Kokoro TTS...")
+try:
+    kokoro = Kokoro(KOKORO_MODEL_FILE, KOKORO_VOICES_FILE)
+    print("  ✓ Kokoro TTS ready")
+except Exception as e:
+    kokoro = None
+    print(f"  ✗ Kokoro TTS failed to load: {e}")
+
+# ── TTS Audio worker ───────────────────────────────────────────────────────────
+def _play_audio(text):
+    if kokoro is None or not text:
+        return
+    try:
+        samples, sample_rate = kokoro.create(text, voice="af_heart", speed=1.0, lang="en-us")
+        sd.play(samples, sample_rate)
+        sd.wait()
+    except Exception as e:
+        print(f"\n  ✗ TTS Playback error: {e}")
 
 # ── MediaPipe ──────────────────────────────────────────────────────────────────
 options = vision.HandLandmarkerOptions(
@@ -355,8 +398,13 @@ while cap.isOpened():
 
             # Commit when stable long enough
             if commit_frames >= COMMIT_FRAMES:
-                word_buffer.append(commit_word)
-                print(f"  + Committed: {commit_word}  [{' → '.join(word_buffer)}]")
+                # Prevent consecutive duplicates natively
+                if not word_buffer or word_buffer[-1] != commit_word:
+                    word_buffer.append(commit_word)
+                    print(f"  + Committed: {commit_word}  [{' → '.join(word_buffer)}]")
+                else:
+                    print(f"  ~ Skipped duplicate: {commit_word}")
+                
                 lock_flash      = 5
                 commit_cooldown = COMMIT_COOLDOWN
                 commit_frames   = 0
@@ -440,7 +488,7 @@ while cap.isOpened():
     draw_panel(frame, 5, buf_y, W - 5, buf_y + 42)
     if word_buffer:
         buf_text = "  ➜  ".join(w.upper() for w in word_buffer)
-        put_shadow(frame, buf_text, (12, buf_y + 28), 0.72, (0, 200, 255), 2)
+        put_shadow(frame, buf_text, (12, buf_y + 28), 0.72, (0, 200, 255), 2, max_width=W-30)
     else:
         put_shadow(frame, "(sign a word to begin...)",
                    (12, buf_y + 26), 0.6, (100, 100, 100), 1)
@@ -454,13 +502,13 @@ while cap.isOpened():
                    0.72, (255, 200, 50), 2)
     elif last_sentence:
         put_shadow(frame, f'"{last_sentence}"', (12, sent_y + 30),
-                   0.80, (255, 255, 160), 2)
+                   0.80, (255, 255, 160), 2, max_width=W-30)
     else:
         put_shadow(frame, "(sentence will appear here)",
                    (12, sent_y + 30), 0.6, (80, 80, 80), 1)
 
     # ── Bottom hints ───────────────────────────────────────────────────────────
-    put_shadow(frame, "ENTER: build   ESC: quit   C: clear   Z: undo",
+    put_shadow(frame, "ENTER: build   ESC: quit   C: clear   Z: undo   S: speak",
                (10, H - 8), 0.38, (150, 150, 150), 1)
 
     cv2.imshow("BSL LSTM Translator", frame)
@@ -472,6 +520,11 @@ while cap.isOpened():
 
     elif key == 13: # ENTER
         complete_sentence()
+
+    elif key in (ord('s'), ord('S')):
+        if last_sentence and not sentence_building:
+            print("  🔊 Speaking sentence...")
+            threading.Thread(target=_play_audio, args=(last_sentence,), daemon=True).start()
 
     elif key in (ord('c'), ord('C')):
         word_buffer.clear()
