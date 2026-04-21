@@ -156,7 +156,7 @@ if not os.path.exists(KOKORO_VOICES_FILE):
 
 # ── Load LSTM model ────────────────────────────────────────────────────────────
 print("=" * 60)
-print("  BSL LSTM Translator  (Word Accumulator + Sentence Formation)")
+print("Yani  BSL LSTM Translator  (Word Accumulator + Sentence Formation)")
 print("=" * 60)
 
 if not os.path.exists(MODEL_PATH) or not os.path.exists(ENCODER_PATH):
@@ -511,7 +511,7 @@ while cap.isOpened():
     put_shadow(frame, "ENTER: build   ESC: quit   C: clear   Z: undo   S: speak",
                (10, H - 8), 0.38, (150, 150, 150), 1)
 
-    cv2.imshow("BSL LSTM Translator", frame)
+    cv2.imshow("Yani BSL LSTM Translator", frame)
 
     key = cv2.waitKey(1) & 0xFF
 
