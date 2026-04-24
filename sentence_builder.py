@@ -165,4 +165,3 @@ class SentenceBuilder:
                 return ' '.join(words)
                 
         return ' '.join(words)
-
