@@ -8,23 +8,7 @@ import urllib.request
 import time
 import json
 
-"""
-LSTM sequence data collection tool.
-Records 30-frame landmark sequences for BSL word signs.
 
-Each recorded sequence = 30 frames × 126 features (2 hands × 21 landmarks × xyz).
-Saved as .npy files under:
-    bsl_data/lstm_sequences/<word>/<sequence_id>.npy
-
-Controls:
-  SPACE    — start/stop recording a sequence (hold the sign while recording)
-  N        — next word
-  P        — previous word
-  ESC      — quit
-
-Tip: Hold your sign pose steady and press SPACE to start the 30-frame capture.
-     For motion signs (wave, rise, rotate) — perform the motion DURING recording.
-"""
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 DATA_DIR      = "bsl_data"

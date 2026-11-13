@@ -1,25 +1,11 @@
-"""
-measure_performance.py
-======================
-Run this once to get the three numbers needed for the Chapter 5 NFR table:
 
-  1. LSTM inference latency (average ms per forward pass)
-  2. BiLSTM validation accuracy on held-out data
-  3. Gemini API round-trip time (average seconds per sentence call)
-
-Usage:
-    python measure_performance.py
-
-Results are printed clearly at the end.
-"""
 
 import time
 import os
 import pickle
 import numpy as np
 
-# Must be set BEFORE importing tensorflow to force legacy Keras 2 behaviour
-# so that .h5 models saved by older TF/Keras versions can be loaded correctly.
+
 os.environ["TF_USE_LEGACY_KERAS"] = "1"
 
 import tensorflow as tf
@@ -46,8 +32,7 @@ if not os.path.exists(MODEL_PATH):
     print(f"  ✗ Model not found at {MODEL_PATH}")
     exit(1)
 
-# Use the same load strategy as the main application (compatible with
-# models saved by older TF/Keras versions)
+
 try:
     model = tf.keras.models.load_model(
         MODEL_PATH,

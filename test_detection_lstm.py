@@ -16,18 +16,7 @@ from kokoro_onnx import Kokoro
 
 from sentence_builder import SentenceBuilder
 
-"""
-BSL LSTM Translator — Word Detection + Sentence Formation
-=========================================================
-Runs the LSTM sign detector and feeds confirmed words into a sentence
-accumulator. When signing pauses, GPT-2 reorders the BSL word sequence
-into the most probable English sentence.
 
-Controls:
-  ESC  — quit
-  C    — clear word buffer and sentence
-  Z    — undo last committed word
-"""
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 DATA_DIR       = "bsl_data"

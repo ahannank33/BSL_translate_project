@@ -256,6 +256,8 @@ class BSLApp(ctk.CTk):
         self._hold_progress    = 0.0   # 1.0 = just lifted, counts down to 0
         self._hold_after_commit = False  # True only if hold follows a commit
         self._sentence_building = False
+        self._cancel_build     = False
+        self._pending_glosses  = []
         self.word_buffer       = []
         self.last_sentence     = ""
         self._running          = True
@@ -655,19 +657,40 @@ class BSLApp(ctk.CTk):
     def _run_sentence_builder(self, words):
         result = sentence_builder.build(list(words))
         with self._lock:
+            cancelled = self._cancel_build
+        if cancelled:
+            # A second Enter was pressed — the fallback was already applied
+            return
+        with self._lock:
             self.last_sentence      = result
             self._sentence_building = False
         print(f'\n  ✓ Sentence: "{result}"')
 
     def _complete_sentence(self):
         with self._lock:
-            wb = list(self.word_buffer)
+            already_building = self._sentence_building
+            wb               = list(self.word_buffer)
+            glosses          = list(self._pending_glosses)
+
+        # ── Second Enter while Gemini is still thinking: bail out immediately ──
+        if already_building:
+            fallback = " ".join(glosses) if glosses else ""
+            if fallback:
+                print(f"  ⚡ Build cancelled — using raw glosses: {glosses}")
+                with self._lock:
+                    self._cancel_build      = True
+                    self._sentence_building = False
+                    self.last_sentence      = fallback
+            return
+
         if not wb:
             return
         print(f"  Signing complete → words: {wb}")
         with self._lock:
             self.word_buffer        = []
             self._sentence_building = True
+            self._cancel_build      = False
+            self._pending_glosses   = list(wb)
         if sentence_builder.ready:
             threading.Thread(target=self._run_sentence_builder,
                              args=(wb,), daemon=True).start()
@@ -675,6 +698,7 @@ class BSLApp(ctk.CTk):
             with self._lock:
                 self.last_sentence      = " ".join(wb)
                 self._sentence_building = False
+                self._pending_glosses   = []
 
     def _speak(self):
         with self._lock:

@@ -9,19 +9,7 @@ import multiprocessing
 import time
 import urllib.request
 
-"""
-Converts the Slingo BSL word-sign dataset (greetings + family) to
-MediaPipe hand landmarks, saved as bsl_data/word_landmarks.csv.
 
-Labels are extracted from the image filename prefix (before the first dot):
-  e.g. afternoon.1e1a27f1-....jpg  →  label = "afternoon"
-
-Uses multiprocessing for speed. Run from the hands/ project folder:
-    python convert_slingo_dataset.py
-
-After running, train the word model:
-    python train_words.py
-"""
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 SLINGO_ROOT = r"C:\Users\ahann\Downloads\SlingoModels-main\SlingoModels-main"

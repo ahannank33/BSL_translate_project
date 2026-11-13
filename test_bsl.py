@@ -1,24 +1,8 @@
-"""
-test_bsl.py
-===========
-Unit and integration tests for the BSL Translator project.
-Run with:  pytest test_bsl.py -v
-
-The helper functions are copied here in isolation so the test file
-does not trigger the webcam, model loading, or any other side-effects
-from the main scripts.
-"""
-
 import numpy as np
 import pytest
 from collections import deque
 from unittest.mock import MagicMock
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Helpers under test — copied from test_detection_lstm.py / bsl_translator_ui.py
-# so that importing them does not launch the webcam or load TF models.
-# ══════════════════════════════════════════════════════════════════════════════
 
 HAND_CONNECTIONS = [
     (0,1),(1,2),(2,3),(3,4),
@@ -258,10 +242,7 @@ class TestGetLeftRight:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _run_accumulator(predictions, commit_frames=3, commit_cooldown=5):
-    """
-    Minimal re-implementation of the camera-loop commit logic for testing.
-    Returns the resulting word buffer after processing all predictions.
-    """
+   
     word_buffer     = []
     commit_word     = None
     commit_frames_c = 0

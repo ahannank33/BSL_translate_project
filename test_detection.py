@@ -11,17 +11,7 @@ from mediapipe.tasks.python import vision
 
 from sentence_builder import SentenceBuilder
 
-"""
-BSL Live Detection — Word Signs + Sentence Formation
-=====================================================
-Detects BSL word signs in real-time, accumulates them into a phrase,
-then uses GPT-2 to reorder the BSL word sequence into natural English.
 
-Controls:
-  ESC       — quit
-  C         — clear the current word buffer / sentence
-  Z         — undo last locked word
-"""
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 DATA_DIR   = "bsl_data"

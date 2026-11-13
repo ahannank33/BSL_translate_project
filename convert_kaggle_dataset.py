@@ -10,17 +10,7 @@ import multiprocessing
 import time
 import urllib.request
 
-"""
-Downloads the BSL Static Alphabet Kaggle dataset and converts images
-to hand landmark CSVs using MediaPipe, saving in the two-hand format
-used by data_collection.py (h1_x/y/z + h2_x/y/z, 126 feature columns).
 
-Uses multiprocessing to run MediaPipe in parallel across CPU cores,
-giving 2-4x speedup. Works for any future image dataset too.
-
-Dataset: philipilono/bsl-static-alphabet
-Structure: Dataset/Dataset/train/<letter>/ and .../test/<letter>/
-"""
 
 # ── Output config ──────────────────────────────────────────────────────────────
 DATA_DIR    = "bsl_data"

@@ -7,19 +7,7 @@ import csv
 import os
 import urllib.request
 
-"""
-Custom word-sign data collection tool.
-Records hand landmarks for BSL word signs and appends to word_landmarks.csv.
 
-Controls:
-  SPACE    — capture current frame (must have hand detected)
-  N        — next word
-  P        — previous word
-  R        — retrain word model immediately (runs train_words.py)
-  ESC      — quit
-
-After collecting 200+ samples per word, press R to retrain.
-"""
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 DATA_DIR   = "bsl_data"

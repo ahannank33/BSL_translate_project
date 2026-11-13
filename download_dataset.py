@@ -2,10 +2,6 @@ import os
 import zipfile
 import shutil
 
-"""
-Script to download and extract the BSL MediaPipe dataset from Kaggle.
-This dataset contains pre-extracted MediaPipe hand landmarks for BSL alphabet and numbers.
-"""
 
 print("=" * 60)
 print("BSL MediaPipe Dataset Download & Setup")

@@ -56,9 +56,9 @@ def load_sequences(seq_dir):
     return np.array(X, dtype=np.float32), np.array(y)
 
 
-# ── Normalize each frame's landmarks ──────────────────────────────────────────
+
 def normalize_hand(hand_vec):
-    """Translate to wrist origin, scale by palm size."""
+    """translate to wrist origin, scale by palm size."""
     if np.all(hand_vec == 0):
         return hand_vec
     pts   = hand_vec.reshape(3, 21).T     # (21, 3)
@@ -70,7 +70,7 @@ def normalize_hand(hand_vec):
 
 
 def normalize_sequence(seq):
-    """Apply normalization to every frame in a sequence. Shape: (T, 126)."""
+    """ normalization of every frame in sequence. shape -> (T, 126)."""
     out = np.zeros_like(seq)
     for t, frame in enumerate(seq):
         h1 = normalize_hand(frame[:63])
@@ -81,30 +81,28 @@ def normalize_sequence(seq):
 
 # ── Build LSTM model ───────────────────────────────────────────────────────────
 def build_model(seq_len: int, feature_dim: int, num_classes: int) -> tf.keras.Model:
-    """
-    Bidirectional LSTM with attention-style global pooling.
-    Input shape: (seq_len, feature_dim)
-    """
+    
+    """    biLSTM with attention-style global pooling."""
+    
     inp = layers.Input(shape=(seq_len, feature_dim), name="landmark_sequence")
 
-    # Block 1 — first Bi-LSTM returns sequences
+    # block 1 - first Bi-LSTM returns sequences
     x = layers.Bidirectional(
         layers.LSTM(128, return_sequences=True, dropout=0.2, recurrent_dropout=0.1),
         name="bilstm_1"
     )(inp)
     x = layers.LayerNormalization()(x)
 
-    # Block 2 — second Bi-LSTM, return sequences for global pooling
+    # block 2 - second Bi-LSTM, return sequences for global pooling
     x = layers.Bidirectional(
         layers.LSTM(64, return_sequences=True, dropout=0.2, recurrent_dropout=0.1),
         name="bilstm_2"
     )(x)
     x = layers.LayerNormalization()(x)
 
-    # Global average pooling over time — lightweight attention alternative
+    # global average pooling
     x = layers.GlobalAveragePooling1D(name="temporal_pool")(x)
 
-    # Dense classifier head
     x = layers.Dense(128, activation='relu')(x)
     x = layers.Dropout(0.3)(x)
     x = layers.Dense(64, activation='relu')(x)

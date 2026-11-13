@@ -1,14 +1,3 @@
-"""
-Gemini API-powered BSL sentence builder.
-
-Uses pure Python standard libraries (urllib.request) to avoid 
-any pip dependency conflicts with TensorFlow.
-
-API key setup:
-  Create a file at `bsl_data/gemini_api_key.txt`
-  Paste your key on the first line.
-  Get a free key at: https://aistudio.google.com
-"""
 
 import os
 import json
